@@ -72,6 +72,16 @@ impl FromStr for MntOps {
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum Search {
+    Spec(String),
+    File(PathBuf),
+    Vfstype(String),
+    Mntopts(Vec<MntOps>),
+    Freq(DumpField),
+    Passno(PassField),
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct MountEntry {
     pub spec: String,
@@ -160,9 +170,76 @@ pub fn get_mount_from<T, U>(target: T, iter: MountIter<U>)
     Ok(ret)
 }
 
+pub fn get_mount_search_from<U>(search: &Search, iter: MountIter<U>)
+        -> Result<Option<Vec<MountEntry>>, ParseError> where U: BufRead {
+    let mut ret = Vec::new();
+    for mount in iter {
+        match mount {
+            Ok(m) => {
+                match search {
+                    &Search::Spec(ref spec) => {
+                        if *spec == m.spec {
+                            ret.push(m);
+                        }
+                    },
+                    &Search::File(ref file) => {
+                        if *file == m.file {
+                            ret.push(m);
+                        }
+                    },
+                    &Search::Vfstype(ref vfstype) => {
+                        if *vfstype == m.vfstype {
+                            ret.push(m);
+                        }
+                    },
+                    &Search::Mntopts(ref mntops) => {
+                        // All the opts must be present for a match
+                        let count = mntops.len();
+                        let mut match_count = 0;
+
+                        // I'm pretty sure there is a more elegant way to do this
+                        for i in mntops {
+                            for x in &m.mntops {
+                                if *i == *x {
+                                    match_count += 1;
+                                }
+                            }
+                        }
+
+                        if match_count == count {
+                            ret.push(m);
+                        }
+                    },
+                    &Search::Freq(ref dumpfield) => {
+                        if *dumpfield == m.freq {
+                            ret.push(m);
+                        }
+                    },
+                    &Search::Passno(ref passno) => {
+                        if *passno == m.passno {
+                            ret.push(m);
+                        }
+                    }
+                }
+            },
+            Err(e) => return Err(e),
+        }
+    }
+
+    if ret.len() == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(ret))
+    }
+}
+
 /// Get the mount point for the `target` using */proc/mounts*
 pub fn get_mount<T>(target: T) -> Result<Option<MountEntry>, ParseError> where T: AsRef<Path> {
     get_mount_from(target, try!(MountIter::new_from_proc()))
+}
+
+pub fn get_mount_search(search: &Search) -> Result<Option<Vec<MountEntry>>, ParseError> {
+    get_mount_search_from(search, try!(MountIter::new_from_proc()))
 }
 
 /// Find the potential mount point providing readable or writable access to a path
