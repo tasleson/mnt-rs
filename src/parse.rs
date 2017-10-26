@@ -170,76 +170,13 @@ pub fn get_mount_from<T, U>(target: T, iter: MountIter<U>)
     Ok(ret)
 }
 
-pub fn get_mount_search_from<U>(search: &Search, iter: MountIter<U>)
-        -> Result<Option<Vec<MountEntry>>, ParseError> where U: BufRead {
-    let mut ret = Vec::new();
-    for mount in iter {
-        match mount {
-            Ok(m) => {
-                match search {
-                    &Search::Spec(ref spec) => {
-                        if *spec == m.spec {
-                            ret.push(m);
-                        }
-                    },
-                    &Search::File(ref file) => {
-                        if *file == m.file {
-                            ret.push(m);
-                        }
-                    },
-                    &Search::Vfstype(ref vfstype) => {
-                        if *vfstype == m.vfstype {
-                            ret.push(m);
-                        }
-                    },
-                    &Search::Mntopts(ref mntops) => {
-                        // All the opts must be present for a match
-                        let count = mntops.len();
-                        let mut match_count = 0;
-
-                        // I'm pretty sure there is a more elegant way to do this
-                        for i in mntops {
-                            for x in &m.mntops {
-                                if *i == *x {
-                                    match_count += 1;
-                                }
-                            }
-                        }
-
-                        if match_count == count {
-                            ret.push(m);
-                        }
-                    },
-                    &Search::Freq(ref dumpfield) => {
-                        if *dumpfield == m.freq {
-                            ret.push(m);
-                        }
-                    },
-                    &Search::Passno(ref passno) => {
-                        if *passno == m.passno {
-                            ret.push(m);
-                        }
-                    }
-                }
-            },
-            Err(e) => return Err(e),
-        }
-    }
-
-    if ret.len() == 0 {
-        Ok(None)
-    } else {
-        Ok(Some(ret))
-    }
-}
-
 /// Get the mount point for the `target` using */proc/mounts*
 pub fn get_mount<T>(target: T) -> Result<Option<MountEntry>, ParseError> where T: AsRef<Path> {
     get_mount_from(target, try!(MountIter::new_from_proc()))
 }
 
-pub fn get_mount_search(search: &Search) -> Result<Option<Vec<MountEntry>>, ParseError> {
-    get_mount_search_from(search, try!(MountIter::new_from_proc()))
+pub fn get_mount_search(search: &Search) -> Result<MountIter<BufReader<File>>, ParseError> {
+    MountIter::new_from_proc_search(search)
 }
 
 /// Find the potential mount point providing readable or writable access to a path
@@ -316,12 +253,21 @@ impl Ord for MountEntry {
 
 pub struct MountIter<T> {
     lines: Enumerate<Lines<T>>,
+    search: Option<Search>,
 }
 
 impl<T> MountIter<T> where T: BufRead {
     pub fn new(mtab: T) -> MountIter<T> {
         MountIter {
             lines: mtab.lines().enumerate(),
+            search: None
+        }
+    }
+
+     pub fn new_search(mtab: T, search: &Search) -> MountIter<T> {
+        MountIter {
+            lines: mtab.lines().enumerate(),
+            search: Some(search.clone())
         }
     }
 }
@@ -331,21 +277,94 @@ impl MountIter<BufReader<File>> {
         let file = try!(File::open(PROC_MOUNTS));
         Ok(MountIter::new(BufReader::new(file)))
     }
+
+    pub fn new_from_proc_search(search: &Search) -> Result<MountIter<BufReader<File>>, ParseError> {
+        let file = try!(File::open(PROC_MOUNTS));
+        Ok(MountIter::new_search(BufReader::new(file), search))
+    }
 }
+
+fn filter(m: &MountEntry, search: &Search) -> bool {
+    match search {
+        &Search::Spec(ref spec) => {
+            if *spec == m.spec {
+                return true;
+            }
+        },
+        &Search::File(ref file) => {
+            if *file == m.file {
+                return true;
+            }
+        },
+        &Search::Vfstype(ref vfstype) => {
+            if *vfstype == m.vfstype {
+                return true;
+            }
+        },
+        &Search::Mntopts(ref mntops) => {
+            // All the opts must be present for a match
+            let count = mntops.len();
+            let mut match_count = 0;
+
+            // I'm pretty sure there is a more elegant way to do this
+            for i in mntops {
+                for x in &m.mntops {
+                    if *i == *x {
+                        match_count += 1;
+                    }
+                }
+            }
+
+            if match_count == count {
+                return true;
+            }
+        },
+        &Search::Freq(ref dumpfield) => {
+            if *dumpfield == m.freq {
+                return true;
+            }
+        },
+        &Search::Passno(ref passno) => {
+            if *passno == m.passno {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 
 impl<T> Iterator for MountIter<T> where T: BufRead {
     type Item = Result<MountEntry, ParseError>;
 
     fn next(&mut self) -> Option<<Self as Iterator>::Item> {
-        match self.lines.next() {
-            Some((nb, line)) => Some(match line {
-                Ok(line) => match <MountEntry as FromStr>::from_str(line.as_ref()) {
-                    Ok(m) => Ok(m),
-                    Err(e) => Err(ParseError::new(format!("Failed at line {}: {}", nb, e))),
+        loop {
+            match self.lines.next() {
+                Some((nb, line)) => match line {
+                    Ok(line) => match <MountEntry as FromStr>::from_str(line.as_ref()) {
+                        Ok(m) => {
+                            if let Some(ref s) = self.search {
+                                if filter(&m, &s ) {
+                                    return Some(Ok(m));
+                                } else {
+                                    continue;
+                                }
+                            } else {
+                                return Some(Ok(m));
+                            }
+                        }
+                        Err(e) => {
+                            return Some(Err(ParseError::new(format!("Failed at line {}: {}", nb, e))));
+                        }
+                    },
+                    Err(e) => {
+                        return Some(Err(From::from(e)));
+                    },
                 },
-                Err(e) => Err(From::from(e)),
-            }),
-            None => None,
+                None => {
+                    return None;
+                },
+            }
         }
     }
 }
